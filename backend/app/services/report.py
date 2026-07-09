@@ -17,10 +17,26 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from sqlalchemy import func
+
+from app.models.analysis_pass import AnalysisPass
 from app.models.brand import Brand
 from app.models.competitor import Competitor, CompetitorScope
 from app.models.persona import Persona
 from app.models.run import LlmRun
+
+# Canonical column order (after the Serial no. column). Snapshots are dicts keyed
+# by these headers; the workbook writes one row per pass in this order.
+HEADERS = [
+    "Brand", "Vision", "Goal", "Moat", "Operating regions",
+    "Personas (ICP)",
+    "Competitors — considered (shortlist)", "Competitors — to review", "Competitors — rejected",
+    "Competitor analysis (max 3)",
+    "Competitor fetch — system prompt", "Competitor fetch — user prompt (inputs)", "Competitor fetch — response (output)",
+    "Competitor analysis — system prompt", "Competitor analysis — user prompt (inputs)", "Competitor analysis — response (output)",
+    "Content themes — system prompt", "Content themes — user prompt (inputs)", "Content themes — response (output)",
+    "Content script — system prompt", "Content script — user prompt (inputs)", "Content script — response (output)",
+]
 
 EXPORTS_DIR = Path(__file__).resolve().parents[2] / "exports"
 
@@ -46,7 +62,8 @@ def _stage_key(stage: str) -> int:
     return 9
 
 
-async def build_bytes(db: AsyncSession, brand_id: uuid.UUID) -> bytes | None:
+async def _snapshot(db: AsyncSession, brand_id: uuid.UUID) -> dict | None:
+    """Current full column snapshot (dict keyed by HEADERS) for a brand."""
     brand = await db.get(Brand, brand_id)
     if brand is None:
         return None
@@ -130,18 +147,22 @@ async def build_bytes(db: AsyncSession, brand_id: uuid.UUID) -> bytes | None:
             f"\n  Features: {feats or 'NA'}"
         )
 
-    def grp(prefix: str, names: set | None = None) -> tuple[str, str, str]:
-        sysL, usrL, rspL = [], [], []
+    def grp(prefix: str, names: set | None = None, last_only: bool = False) -> tuple[str, str, str]:
+        sel = []
         for r in runs:
             if not r.stage.startswith(prefix):
                 continue
             if prefix == "competitors:analyze:" and names is not None and r.stage[len(prefix):] not in names:
                 continue
-            sysL.append(f"[{r.stage}]\n{r.system_prompt}")
-            usrL.append(f"[{r.stage}]\n{r.user_prompt}")
-            rspL.append(f"[{r.stage}]\n{r.response}")
+            sel.append(r)
+        if last_only and sel:
+            sel = [sel[-1]]  # runs sorted by time → keep only the most recent call
         j = lambda L: ("\n\n".join(L) or "—")  # noqa: E731
-        return j(sysL), j(usrL), j(rspL)
+        return (
+            j([f"[{r.stage}]\n{r.system_prompt}" for r in sel]),
+            j([f"[{r.stage}]\n{r.user_prompt}" for r in sel]),
+            j([f"[{r.stage}]\n{r.response}" for r in sel]),
+        )
 
     personas_cell = "\n\n".join(persona_str(p) for p in personas) or "—"
     considered_cell = "\n".join(comp_line(c) for c in competitors if c.status == "considered") or "—"
@@ -150,46 +171,88 @@ async def build_bytes(db: AsyncSession, brand_id: uuid.UUID) -> bytes | None:
     analysis_cell = "\n\n".join(analysis_str(c) for c in targets if c.analysis) or "—"
     fetch_sys, fetch_usr, fetch_rsp = grp("competitors:fetch")
     an_sys, an_usr, an_rsp = grp("competitors:analyze:", target_names)
-    th_sys, th_usr, th_rsp = grp("content:themes")
-    sc_sys, sc_usr, sc_rsp = grp("content:generate")
+    th_sys, th_usr, th_rsp = grp("content:themes", last_only=True)
+    sc_sys, sc_usr, sc_rsp = grp("content:generate", last_only=True)
 
-    columns: list[tuple[str, str]] = [
-        ("Serial no.", "1"),
-        ("Brand", brand.name),
-        ("Vision", brand.vision or "—"),
-        ("Goal", brand.goal or "—"),
-        ("Moat", brand.moat or "—"),
-        ("Operating regions", regions),
-        ("Personas (ICP)", personas_cell),
-        ("Competitors — considered (shortlist)", considered_cell),
-        ("Competitors — to review", review_cell),
-        ("Competitors — rejected", rejected_cell),
-        ("Competitor analysis (max 3)", analysis_cell),
-        ("Competitor fetch — system prompt", fetch_sys),
-        ("Competitor fetch — user prompt (inputs)", fetch_usr),
-        ("Competitor fetch — response (output)", fetch_rsp),
-        ("Competitor analysis — system prompt", an_sys),
-        ("Competitor analysis — user prompt (inputs)", an_usr),
-        ("Competitor analysis — response (output)", an_rsp),
-        ("Content themes — system prompt", th_sys),
-        ("Content themes — user prompt (inputs)", th_usr),
-        ("Content themes — response (output)", th_rsp),
-        ("Content script — system prompt", sc_sys),
-        ("Content script — user prompt (inputs)", sc_usr),
-        ("Content script — response (output)", sc_rsp),
-    ]
+    return {
+        "Brand": brand.name,
+        "Vision": brand.vision or "—",
+        "Goal": brand.goal or "—",
+        "Moat": brand.moat or "—",
+        "Operating regions": regions,
+        "Personas (ICP)": personas_cell,
+        "Competitors — considered (shortlist)": considered_cell,
+        "Competitors — to review": review_cell,
+        "Competitors — rejected": rejected_cell,
+        "Competitor analysis (max 3)": analysis_cell,
+        "Competitor fetch — system prompt": fetch_sys,
+        "Competitor fetch — user prompt (inputs)": fetch_usr,
+        "Competitor fetch — response (output)": fetch_rsp,
+        "Competitor analysis — system prompt": an_sys,
+        "Competitor analysis — user prompt (inputs)": an_usr,
+        "Competitor analysis — response (output)": an_rsp,
+        "Content themes — system prompt": th_sys,
+        "Content themes — user prompt (inputs)": th_usr,
+        "Content themes — response (output)": th_rsp,
+        "Content script — system prompt": sc_sys,
+        "Content script — user prompt (inputs)": sc_usr,
+        "Content script — response (output)": sc_rsp,
+    }
+
+
+async def record_pass(db: AsyncSession, brand_id: uuid.UUID | None) -> None:
+    """Append the current snapshot as a NEW pass (never replaces prior passes)."""
+    if brand_id is None:
+        return
+    snap = await _snapshot(db, brand_id)
+    if snap is None:
+        return
+    nxt = (
+        await db.scalar(select(func.max(AnalysisPass.serial)).where(AnalysisPass.brand_id == brand_id))
+    ) or 0
+    db.add(AnalysisPass(brand_id=brand_id, serial=nxt + 1, snapshot=snap))
+    await db.commit()
+
+
+async def build_bytes(db: AsyncSession, brand_id: uuid.UUID) -> bytes | None:
+    """Workbook = one row per recorded pass (Serial no. = pass number). If no
+    pass has been recorded yet, show the current live snapshot as a single row."""
+    brand = await db.get(Brand, brand_id)
+    if brand is None:
+        return None
+
+    passes = (
+        (
+            await db.execute(
+                select(AnalysisPass)
+                .where(AnalysisPass.brand_id == brand_id)
+                .order_by(AnalysisPass.serial)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if passes:
+        rows = [(p.serial, p.snapshot) for p in passes]
+    else:
+        snap = await _snapshot(db, brand_id)
+        rows = [(1, snap)] if snap else []
 
     wb = Workbook()
     ws: Worksheet = wb.active
     ws.title = "Analysis"
-    for ci, (name, val) in enumerate(columns, start=1):
+    headers = ["Serial no.", *HEADERS]
+    for ci, name in enumerate(headers, start=1):
         h = ws.cell(row=1, column=ci, value=name)
         h.font = HEADER_FONT
         h.fill = HEADER_FILL
         h.alignment = WRAP
-        ws.column_dimensions[get_column_letter(ci)].width = 42
-        ws.cell(row=2, column=ci, value=val).alignment = WRAP
-    ws.freeze_panes = "A2"
+        ws.column_dimensions[get_column_letter(ci)].width = 12 if ci == 1 else 42
+    for ri, (serial, snap) in enumerate(rows, start=2):
+        ws.cell(row=ri, column=1, value=serial).alignment = WRAP
+        for ci, hname in enumerate(HEADERS, start=2):
+            ws.cell(row=ri, column=ci, value=(snap or {}).get(hname)).alignment = WRAP
+    ws.freeze_panes = "B2"
 
     buf = io.BytesIO()
     wb.save(buf)

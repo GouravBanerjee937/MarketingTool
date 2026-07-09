@@ -141,5 +141,6 @@ async def generate_brand_content(
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY, f"Content generation failed: {e}"
         )
+    await report.record_pass(db, brand_id)  # each generation = a new row (never replaced)
     await report.refresh(db, brand_id)
     return ContentGenerateOut(script=script)
