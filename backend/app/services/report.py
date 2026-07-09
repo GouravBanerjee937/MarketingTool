@@ -77,7 +77,15 @@ async def build_bytes(db: AsyncSession, brand_id: uuid.UUID) -> bytes | None:
     scope = (
         await db.execute(select(CompetitorScope).where(CompetitorScope.brand_id == brand_id))
     ).scalar_one_or_none()
-    regions = ", ".join(scope.regions) if scope and scope.regions else "—"
+    # Operating regions: derive from the personas' distinct regions (plus any
+    # regions saved on the competitor scope), deduped, order-preserving.
+    seen: set[str] = set()
+    merged: list[str] = []
+    for r in [(p.region or "").strip() for p in personas] + (list(scope.regions) if scope and scope.regions else []):
+        if r and r.lower() not in seen:
+            seen.add(r.lower())
+            merged.append(r)
+    regions = ", ".join(merged) if merged else "—"
     runs = (await db.execute(select(LlmRun).where(LlmRun.brand_id == brand_id))).scalars().all()
     runs = sorted(
         runs,
