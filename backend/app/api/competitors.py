@@ -17,6 +17,7 @@ from app.schemas.competitor import (
     CompetitorScopeOut,
     CompetitorStatusUpdate,
 )
+from app.services import report, run_log, run_store
 from app.services.llm import (
     LLMNotConfigured,
     analyze_competitor,
@@ -83,6 +84,7 @@ async def put_scope(
     scope.regions = payload.regions
     await db.commit()
     await db.refresh(scope)
+    await report.refresh(db, brand_id)
     return scope
 
 
@@ -133,17 +135,20 @@ async def fetch_brand_competitors(
     )
     existing = {n for (n,) in existing_res.all()}
 
+    stage = f"competitors:fetch:{kind}"
     try:
-        suggestions = await fetch_competitors(
-            brand_name=brand.name,
-            vision=brand.vision,
-            goal=brand.goal,
-            moat=brand.moat,
-            personas=personas,
-            regions=regions,
-            exclude_names=existing,
-            general=(kind == "general"),
-        )
+        with run_log.capture(stage) as runs:
+            suggestions = await fetch_competitors(
+                brand_name=brand.name,
+                vision=brand.vision,
+                goal=brand.goal,
+                moat=brand.moat,
+                personas=personas,
+                regions=regions,
+                exclude_names=existing,
+                general=(kind == "general"),
+            )
+        await run_store.persist(db, brand_id, stage, runs)
     except LLMNotConfigured as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     except Exception as e:  # noqa: BLE001 — surface provider errors cleanly
@@ -162,6 +167,7 @@ async def fetch_brand_competitors(
             )
         )
     await db.commit()
+    await report.refresh(db, brand_id)
 
     result = await db.execute(
         select(Competitor)
@@ -210,6 +216,7 @@ async def add_competitor(
     db.add(comp)
     await db.commit()
     await db.refresh(comp)
+    await report.refresh(db, brand_id)
     return comp
 
 
@@ -232,6 +239,7 @@ async def set_competitor_status(
         comp.is_primary = False
     await db.commit()
     await db.refresh(comp)
+    await report.refresh(db, comp.brand_id)
     return comp
 
 
@@ -252,6 +260,7 @@ async def pick_primary_competitor(
     if comp.status != "considered":
         comp.status = "considered"
     await db.commit()
+    await report.refresh(db, comp.brand_id)
 
     result = await db.execute(
         select(Competitor)
@@ -268,10 +277,13 @@ async def analyze_one_competitor(
     """Analyze a competitor with the LLM (name, revenue, users, moats, social,
     features + sample marketing) and store the result. NA where unknown."""
     comp = await _load_competitor(competitor_id, db)
+    stage = f"competitors:analyze:{comp.name}"
     try:
-        analysis = await analyze_competitor(
-            name=comp.name, website=comp.website, description=comp.description
-        )
+        with run_log.capture(stage) as runs:
+            analysis = await analyze_competitor(
+                name=comp.name, website=comp.website, description=comp.description
+            )
+        await run_store.persist(db, comp.brand_id, stage, runs)
     except LLMNotConfigured as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     except Exception as e:  # noqa: BLE001
@@ -281,6 +293,7 @@ async def analyze_one_competitor(
     comp.analysis = analysis
     await db.commit()
     await db.refresh(comp)
+    await report.refresh(db, comp.brand_id)
     return comp
 
 

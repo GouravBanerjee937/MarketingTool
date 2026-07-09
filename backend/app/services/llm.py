@@ -14,6 +14,7 @@ import re
 import httpx
 
 from app.core.config import get_settings
+from app.services import run_log
 
 
 class LLMNotConfigured(RuntimeError):
@@ -56,7 +57,9 @@ async def _chat(
     except httpx.HTTPError as e:
         raise LLMNotConfigured(f"Ollama request failed: {e}") from e
 
-    return (data.get("message") or {}).get("content") or ""
+    content = (data.get("message") or {}).get("content") or ""
+    run_log.record(system=system, user=user, response=content)
+    return content
 
 
 def _loads(text: str) -> dict:

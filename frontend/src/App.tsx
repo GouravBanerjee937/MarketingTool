@@ -3,6 +3,7 @@ import { BrandInputs } from './components/BrandInputs'
 import { ICPBuilder } from './components/ICPBuilder'
 import { CompetitorAgent } from './components/CompetitorAgent'
 import { ContentCreator } from './components/ContentCreator'
+import { AnalysisExport } from './components/AnalysisExport'
 import './App.css'
 
 const STEPS = [
@@ -10,6 +11,7 @@ const STEPS = [
   { key: 'icp-builder', label: 'ICP builder', render: () => <ICPBuilder /> },
   { key: 'competitors', label: 'Competitors', render: () => <CompetitorAgent /> },
   { key: 'content', label: 'Content creation', render: () => <ContentCreator /> },
+  { key: 'analysis', label: 'Analysis', render: () => <AnalysisExport /> },
 ] as const
 
 export default function App() {

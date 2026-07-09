@@ -13,3 +13,6 @@ frontend/dist/
 .DS_Store
 .idea/
 .vscode/
+
+# Generated analysis reports
+backend/exports/

@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.models.brand import Brand
 from app.schemas.brand import BrandCreate, BrandOut, BrandUpdate
+from app.services import report
 
 router = APIRouter(prefix="/brands", tags=["brands"])
 
@@ -30,6 +31,7 @@ async def create_brand(payload: BrandCreate, db: AsyncSession = Depends(get_db))
     db.add(brand)
     await db.commit()
     await db.refresh(brand)
+    await report.refresh(db, brand.id)  # start the report from stage 1
     return brand
 
 
@@ -48,6 +50,7 @@ async def update_brand(
         setattr(brand, field, value)
     await db.commit()
     await db.refresh(brand)
+    await report.refresh(db, brand.id)
     return brand
 
 

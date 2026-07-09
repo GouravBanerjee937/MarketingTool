@@ -90,11 +90,11 @@ export function CompetitorAgent() {
     if (primary && !primary.analysis) analyze(primary.id)
   }
 
-  // Analyse every considered competitor that isn't analysed yet, one at a time
-  // so progress is visible per company.
-  async function analyzeAll() {
+  // Analyse considered competitors one at a time (progress visible per company).
+  // force=false → only those not analysed yet; force=true → re-analyse all.
+  async function analyzeAll(force = false) {
     const ids = competitors
-      .filter((c) => c.status === 'considered' && !c.analysis)
+      .filter((c) => c.status === 'considered' && (force || !c.analysis))
       .map((c) => c.id)
     if (ids.length === 0) return
     setBulkAnalyzing(true)
@@ -208,7 +208,8 @@ export function CompetitorAgent() {
             analyzingId={analyzingId}
             bulkBusy={bulkAnalyzing}
             onAnalyze={analyze}
-            onAnalyzeAll={analyzeAll}
+            onAnalyzeAll={() => analyzeAll(false)}
+            onReanalyzeAll={() => analyzeAll(true)}
           />
         </div>
       )}
@@ -252,12 +253,14 @@ function AnalysisPanel({
   bulkBusy,
   onAnalyze,
   onAnalyzeAll,
+  onReanalyzeAll,
 }: {
   considered: Competitor[]
   analyzingId: string | null
   bulkBusy: boolean
   onAnalyze: (id: string) => void
   onAnalyzeAll: () => void
+  onReanalyzeAll: () => void
 }) {
   const [viewId, setViewId] = useState('')
 
@@ -298,9 +301,19 @@ function AnalysisPanel({
             figure is unavailable. <strong>{analyzedCount}/{considered.length}</strong> analysed.
           </p>
         </div>
-        <button onClick={onAnalyzeAll} disabled={bulkBusy || analyzingId !== null || allAnalyzed}>
-          {bulkBusy ? 'Analysing all…' : allAnalyzed ? 'All analysed' : 'Analyse all'}
-        </button>
+        <div className="fetch-buttons">
+          <button onClick={onAnalyzeAll} disabled={bulkBusy || analyzingId !== null || allAnalyzed}>
+            {bulkBusy ? 'Analysing all…' : allAnalyzed ? 'All analysed' : 'Analyse all'}
+          </button>
+          <button
+            className="ghost"
+            onClick={onReanalyzeAll}
+            disabled={bulkBusy || analyzingId !== null || analyzedCount === 0}
+            title="Re-run analysis on every considered competitor, including already-analysed ones"
+          >
+            {bulkBusy ? 'Analysing all…' : 'Reanalyse all'}
+          </button>
+        </div>
       </div>
 
       <div className="analysis-picker">

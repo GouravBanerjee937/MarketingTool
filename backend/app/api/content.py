@@ -15,6 +15,7 @@ from app.schemas.content import (
     ContentThemesIn,
     ContentThemesOut,
 )
+from app.services import report, run_log, run_store
 from app.services.llm import (
     LLMNotConfigured,
     generate_content,
@@ -77,25 +78,28 @@ async def suggest_brand_content_themes(
         brand_id, db
     )
     try:
-        themes = await suggest_content_themes(
-            brand_name=brand.name,
-            vision=brand.vision,
-            goal=brand.goal,
-            moat=brand.moat,
-            personas=personas,
-            competitors=competitors,
-            form=payload.form,
-            content_format=payload.content_format,
-            platform=payload.platform,
-            voice_samples=voice_samples,
-            banned_words=banned_words,
-        )
+        with run_log.capture("content:themes") as runs:
+            themes = await suggest_content_themes(
+                brand_name=brand.name,
+                vision=brand.vision,
+                goal=brand.goal,
+                moat=brand.moat,
+                personas=personas,
+                competitors=competitors,
+                form=payload.form,
+                content_format=payload.content_format,
+                platform=payload.platform,
+                voice_samples=voice_samples,
+                banned_words=banned_words,
+            )
+        await run_store.persist(db, brand_id, "content:themes", runs)
     except LLMNotConfigured as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     except Exception as e:  # noqa: BLE001 — surface provider errors cleanly
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY, f"Theme suggestion failed: {e}"
         )
+    await report.refresh(db, brand_id)
     return ContentThemesOut(themes=themes)
 
 
@@ -112,26 +116,30 @@ async def generate_brand_content(
     brand, personas, competitors, voice_samples, banned_words = await _load_brand_brain(
         brand_id, db
     )
+    stage = f"content:generate:{payload.platform}"
     try:
-        script = await generate_content(
-            brand_name=brand.name,
-            vision=brand.vision,
-            goal=brand.goal,
-            moat=brand.moat,
-            personas=personas,
-            competitors=competitors,
-            form=payload.form,
-            content_format=payload.content_format,
-            platform=payload.platform,
-            theme_title=payload.theme_title,
-            theme_angle=payload.theme_angle,
-            voice_samples=voice_samples,
-            banned_words=banned_words,
-        )
+        with run_log.capture(stage) as runs:
+            script = await generate_content(
+                brand_name=brand.name,
+                vision=brand.vision,
+                goal=brand.goal,
+                moat=brand.moat,
+                personas=personas,
+                competitors=competitors,
+                form=payload.form,
+                content_format=payload.content_format,
+                platform=payload.platform,
+                theme_title=payload.theme_title,
+                theme_angle=payload.theme_angle,
+                voice_samples=voice_samples,
+                banned_words=banned_words,
+            )
+        await run_store.persist(db, brand_id, stage, runs)
     except LLMNotConfigured as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     except Exception as e:  # noqa: BLE001 — surface provider errors cleanly
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY, f"Content generation failed: {e}"
         )
+    await report.refresh(db, brand_id)
     return ContentGenerateOut(script=script)

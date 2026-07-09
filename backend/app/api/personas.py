@@ -9,6 +9,7 @@ from app.db.session import get_db
 from app.models.brand import Brand
 from app.models.persona import MAX_PERSONAS_PER_BRAND, Persona, PersonaVariant
 from app.schemas.persona import PersonaCreate, PersonaOut, PersonaUpdate, VariantIn
+from app.services import report
 
 router = APIRouter(tags=["personas"])
 
@@ -79,6 +80,7 @@ async def create_persona(
     )
     db.add(persona)
     await db.commit()
+    await report.refresh(db, brand_id)
     return await _load_persona(persona.id, db)
 
 
@@ -101,11 +103,14 @@ async def update_persona(
         persona.variants = _build_variants(payload.variants)
 
     await db.commit()
+    await report.refresh(db, persona.brand_id)
     return await _load_persona(persona.id, db)
 
 
 @router.delete("/personas/{persona_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_persona(persona_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     persona = await _load_persona(persona_id, db)
+    brand_id = persona.brand_id
     await db.delete(persona)
     await db.commit()
+    await report.refresh(db, brand_id)
