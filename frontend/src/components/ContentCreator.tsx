@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
-import type { Brand, BrandVoiceInput, ContentForm, ContentTheme, VoiceSample } from '../types'
+import type { Brand, BrandVoiceInput, Competitor, ContentForm, ContentTheme, VoiceSample } from '../types'
 
 const PLATFORMS_BY_FORM: Record<ContentForm, string[]> = {
   long: ['Blogs', 'Instagram scripts'],
@@ -38,6 +38,12 @@ export function ContentCreator() {
   const [voice, setVoice] = useState<BrandVoiceInput>({ voice_samples: [], banned_words: [] })
   const [voiceOpen, setVoiceOpen] = useState(false)
 
+  // Inspiration: one considered competitor + liked features from other competitors
+  const [competitors, setCompetitors] = useState<Competitor[]>([])
+  const [inspirationId, setInspirationId] = useState('')
+  const [likedFeatures, setLikedFeatures] = useState<string[]>([])
+  const [likeDraft, setLikeDraft] = useState('')
+
   useEffect(() => {
     api.listBrands().then(setBrands)
   }, [])
@@ -62,10 +68,51 @@ export function ContentCreator() {
     }
   }, [brandId])
 
+  // Load the brand's considered competitors (for inspiration + liked features).
+  useEffect(() => {
+    setInspirationId('')
+    setLikedFeatures([])
+    setLikeDraft('')
+    if (!brandId) {
+      setCompetitors([])
+      return
+    }
+    let alive = true
+    api
+      .listCompetitors(brandId)
+      .then((cs) => { if (alive) setCompetitors(cs.filter((c) => c.status === 'considered')) })
+      .catch(() => { if (alive) setCompetitors([]) })
+    return () => { alive = false }
+  }, [brandId])
+
   const effectivePlatform = platform === OTHER ? customPlatform.trim() : platform
   const contentFormat =
     platform === OTHER ? customPlatform.trim() : FORMAT_FOR_PLATFORM[platform] ?? platform
   const inputsReady = !!brandId && !!form && !!effectivePlatform
+
+  const inspirationName = competitors.find((c) => c.id === inspirationId)?.name
+  // Liked-feature options: features from competitors OTHER than the inspiration one.
+  const featureOptions = Array.from(
+    new Set(
+      competitors
+        .filter((c) => c.id !== inspirationId)
+        .flatMap((c) => (c.analysis?.features ?? []).map((f) => f.feature))
+        .filter(Boolean),
+    ),
+  )
+
+  const addLiked = (val: string) => {
+    const v = val.trim()
+    if (v && !likedFeatures.includes(v)) {
+      setLikedFeatures((xs) => [...xs, v])
+      resetDownstream()
+    }
+    setLikeDraft('')
+  }
+  const removeLiked = (v: string) => {
+    setLikedFeatures((xs) => xs.filter((x) => x !== v))
+    resetDownstream()
+  }
 
   // Any change to the inputs invalidates previously suggested themes + script.
   function resetDownstream() {
@@ -88,6 +135,8 @@ export function ContentCreator() {
         form: form as ContentForm,
         content_format: contentFormat,
         platform: effectivePlatform,
+        inspiration: inspirationName || undefined,
+        liked_features: likedFeatures,
       })
       setThemes(res.themes)
     } catch (e) {
@@ -109,6 +158,8 @@ export function ContentCreator() {
         platform: effectivePlatform,
         theme_title: theme.title,
         theme_angle: theme.angle,
+        inspiration: inspirationName || undefined,
+        liked_features: likedFeatures,
       })
       setScript(res.script)
       setGenerated(true)
@@ -222,13 +273,90 @@ export function ContentCreator() {
             </section>
           )}
 
+          {competitors.length > 0 && (
+            <section className="card">
+              <h3>Inspiration (optional)</h3>
+              <p className="field-why">
+                Draw on your Competitor analysis: pick one competitor to take inspiration from, and
+                add features you liked from any other competitor.
+              </p>
+
+              <label className="brand-select">
+                <span>Select a brand for inspiration</span>
+                <select
+                  value={inspirationId}
+                  onChange={(e) => { setInspirationId(e.target.value); resetDownstream() }}
+                >
+                  <option value="">None</option>
+                  {competitors.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}{c.is_primary ? ' ★' : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="field" style={{ marginTop: 12 }}>
+                <span className="field-label">Liked features (from any other competitor)</span>
+                <div className="chip-row">
+                  <select
+                    value=""
+                    onChange={(e) => e.target.value && addLiked(e.target.value)}
+                    disabled={featureOptions.length === 0}
+                  >
+                    <option value="">
+                      {featureOptions.length ? 'Pick a feature…' : 'No analysed features yet'}
+                    </option>
+                    {featureOptions
+                      .filter((f) => !likedFeatures.includes(f))
+                      .map((f) => (
+                        <option key={f} value={f}>{f}</option>
+                      ))}
+                  </select>
+                  <input
+                    className="text-input"
+                    value={likeDraft}
+                    onChange={(e) => setLikeDraft(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addLiked(likeDraft) } }}
+                    placeholder="…or type a feature and press Enter"
+                    style={{ maxWidth: 300 }}
+                  />
+                  <button type="button" className="ghost" onClick={() => addLiked(likeDraft)}>Add</button>
+                </div>
+                {likedFeatures.length > 0 && (
+                  <div className="chips" style={{ marginTop: 8 }}>
+                    {likedFeatures.map((f) => (
+                      <span className="chip" key={f}>
+                        {f}
+                        <button type="button" onClick={() => removeLiked(f)}>✕</button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
+
           {error && <div className="alert">{error}</div>}
 
           {inputsReady && (
             <section className="card">
               <div className="comp-fetch-head">
                 <div>
-                  <h3>Content themes</h3>
+                  <h3 style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+                    Content themes
+                    {themes.length > 0 && (
+                      <button
+                        type="button"
+                        className="ghost refresh-themes"
+                        title="Get a new set of themes"
+                        onClick={suggestThemes}
+                        disabled={themesLoading || generating}
+                      >
+                        🔄 Refresh
+                      </button>
+                    )}
+                  </h3>
                   <p className="field-why">
                     {themes.length
                       ? 'Pick the direction you like, then generate the script for it.'

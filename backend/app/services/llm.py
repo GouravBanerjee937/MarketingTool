@@ -12,6 +12,7 @@ import json
 import re
 
 import httpx
+from openai import AsyncOpenAI
 
 from app.core.config import get_settings
 from app.services import run_log
@@ -104,6 +105,7 @@ _EXAMPLE_THEMES = {
          "angle": "one-to-two sentence angle explaining the idea"}
     ]
 }
+# Qwen produces the analysis up to social presence (features come from OpenAI).
 _EXAMPLE_ANALYSIS = {
     "name": "Example Co",
     "revenue_usd": "$1.2B (FY2025)",
@@ -114,10 +116,14 @@ _EXAMPLE_ANALYSIS = {
     "moats": ["primary advantage 1", "primary advantage 2"],
     "social": {"instagram": True, "blog": True, "facebook": True, "x": True,
                "thirdparty": "YouTube or NA"},
+}
+
+# OpenAI (ChatGPT) produces the features-marketed part.
+_EXAMPLE_FEATURES = {
     "features": [
         {"feature": "feature name",
          "sample_marketing": "one-line marketing message in their style",
-         "source": "product/landing page or NA"}
+         "source": "product/landing page URL or NA"}
     ],
 }
 
@@ -286,14 +292,56 @@ _ANALYSIS_SYSTEM = (
     "- social: true/false for a known presence on instagram, blog, facebook, x "
     "(twitter); thirdparty = name of any other notable channel (YouTube, LinkedIn, "
     "TikTok, …) or \"NA\".\n"
-    "- features: the key features/products the company markets, each with a "
-    "one-line sample marketing message in their style, and a `source` = the "
-    "publisher + URL of the page where that feature/message is found (the "
-    "product, landing, pricing or docs page, e.g. 'Zoho Books "
-    "(https://www.zoho.com/books/features/)'). Use \"NA\" only if no source "
-    "URL can be found.\n"
     "Keep revenue and users as clean values with no inline citation markup — the "
     "citation belongs only in the *_source fields."
+)
+
+# OpenAI (ChatGPT) — features + top-3 marketing copy, with REAL links via web search.
+_FEATURES_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "features": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "feature": {"type": "string"},
+                    "sample_marketing": {"type": "string"},
+                    "source": {"type": "string"},
+                },
+                "required": ["feature", "sample_marketing", "source"],
+                "additionalProperties": False,
+            },
+        },
+        "marketing_copy": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "copy": {"type": "string"},
+                    "source": {"type": "string"},
+                },
+                "required": ["copy", "source"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["features", "marketing_copy"],
+    "additionalProperties": False,
+}
+
+_FEATURES_SYSTEM = (
+    "You are a competitive-intelligence analyst WITH WEB SEARCH. Search the web for "
+    "the given company and return two things:\n"
+    "1) features: 5-8 key features/products it markets. For each: a short feature "
+    "name, a one-line 'sample_marketing' message in that company's marketing "
+    "style, and 'source' = the actual URL you found (a working product/landing/"
+    "pricing/docs page).\n"
+    "2) marketing_copy: the company's TOP 3 real marketing copy lines — taglines, "
+    "ad headlines or hero-section copy actually used by the brand. For each: the "
+    "'copy' text and 'source' = the URL where you found it.\n"
+    "Use ONLY URLs you actually found via search — never guess, pattern-complete, "
+    "or invent a URL. If you cannot find a real source, set that source to 'NA'."
 )
 
 
@@ -356,6 +404,23 @@ def _competitor_block(competitors: list[dict]) -> str:
         extra = f" — strengths: {moats}" if moats else ""
         lines.append(f"- {c['name']}{tag}{extra}")
     return "\n".join(lines) or "- (none shortlisted)"
+
+
+def _inspiration_block(inspiration: str | None, liked_features: list[str] | None) -> str:
+    """Optional 'inspiration brand' + liked competitor features to weave in."""
+    parts = []
+    if inspiration and inspiration.strip():
+        parts.append(
+            f"Take inspiration from how {inspiration.strip()} approaches its marketing "
+            "(tone, angles, positioning) — adapt it to this brand, do NOT copy."
+        )
+    feats = [f.strip() for f in (liked_features or []) if f and f.strip()]
+    if feats:
+        parts.append(
+            "Highlight / echo these liked competitor features where they fit: "
+            + ", ".join(feats) + "."
+        )
+    return "\n\nINSPIRATION\n" + "\n".join(parts) if parts else ""
 
 
 # --- Brand Voice: writing-style samples + banned words -----------------
@@ -422,7 +487,9 @@ _THEMES_SYSTEM = (
     "You are a senior brand marketing strategist. Given a brand's strategy, its "
     "target personas and how it is differentiated from competitors, propose "
     "distinct, ready-to-develop content ideas (themes) for a specific format and "
-    "platform. Each theme has a short, specific title and a one-to-two sentence "
+    "platform. The themes are FOR the given brand ONLY — each must promote THAT "
+    "brand; competitors and any inspiration brand are reference only, never the "
+    "subject. Each theme has a short, specific title and a one-to-two sentence "
     "angle explaining what it covers and why it resonates with the personas or "
     "sets the brand apart. Make the themes genuinely different from one another "
     "and appropriate for the platform's guidelines. Never invent statistics."
@@ -442,6 +509,8 @@ async def suggest_content_themes(
     platform: str,
     voice_samples: list[str] | None = None,
     banned_words: list[str] | None = None,
+    inspiration: str | None = None,
+    liked_features: list[str] | None = None,
     count: int = 5,
 ) -> list[dict]:
     user = f"""Propose {count} distinct content themes for a {content_format} to be published on {platform}, for the brand below.
@@ -460,7 +529,7 @@ COMPETITIVE CONTEXT (differentiate against these where relevant)
 
 FORMAT: {content_format}
 LENGTH: {_length_rule(form)}
-PLATFORM GUIDELINES ({platform}): {_platform_guideline(platform)}{_voice_block(voice_samples)}{_banned_line(banned_words)}
+PLATFORM GUIDELINES ({platform}): {_platform_guideline(platform)}{_voice_block(voice_samples)}{_banned_line(banned_words)}{_inspiration_block(inspiration, liked_features)}
 
 Return {count} clearly distinct themes, each with a short specific title and a one-to-two sentence angle."""
 
@@ -485,11 +554,14 @@ Return {count} clearly distinct themes, each with a short specific title and a o
 _CONTENT_SYSTEM = (
     "You are a senior brand marketing copywriter. You write publish-ready content "
     "grounded in the brand's strategy, its target personas, and how it is "
-    "differentiated from its competitors. You strictly follow the target "
-    "platform's guidelines and the requested format and length. Write in the "
-    "brand's voice, make specific and credible claims (never invent statistics), "
-    "and return ONLY the content itself — ready to paste — using light markdown "
-    "for structure where the platform allows it. No preamble, notes or explanations."
+    "differentiated from its competitors. The content is FOR and ABOUT the given "
+    "brand ONLY — promote THAT brand, name it, speak in its voice. NEVER write the "
+    "content as, for, or promoting a competitor or the inspiration brand; those are "
+    "reference only (for angle/tone/positioning). You strictly follow the target "
+    "platform's guidelines and the requested format and length, make specific and "
+    "credible claims (never invent statistics), and return ONLY the content itself "
+    "— ready to paste — using light markdown where the platform allows it. No "
+    "preamble, notes or explanations."
 )
 
 
@@ -508,6 +580,8 @@ async def generate_content(
     theme_angle: str | None = None,
     voice_samples: list[str] | None = None,
     banned_words: list[str] | None = None,
+    inspiration: str | None = None,
+    liked_features: list[str] | None = None,
 ) -> str:
     theme_line = ""
     if theme_title:
@@ -530,7 +604,7 @@ COMPETITIVE CONTEXT (differentiate against these where relevant)
 
 FORMAT: {content_format}
 LENGTH: {_length_rule(form)}
-PLATFORM GUIDELINES ({platform}): {_platform_guideline(platform)}{_voice_block(voice_samples)}{_banned_line(banned_words)}{theme_line}
+PLATFORM GUIDELINES ({platform}): {_platform_guideline(platform)}{_voice_block(voice_samples)}{_banned_line(banned_words)}{_inspiration_block(inspiration, liked_features)}{theme_line}
 
 Write the {content_format} now. Return only the content, ready to publish."""
 
@@ -558,18 +632,259 @@ Write the {content_format} now. Return only the content, ready to publish."""
     return content
 
 
+async def _openai_extras(
+    *, name: str, website: str | None, description: str | None
+) -> dict:
+    """Features marketed + top-3 marketing copy — generated by OpenAI (ChatGPT web
+    search). Returns {"features": [...], "marketing_copy": [...]}."""
+    settings = get_settings()
+    if not settings.openai_api_key:
+        raise LLMNotConfigured(
+            "OPENAI_API_KEY is not set — features/marketing copy use ChatGPT. "
+            "Add it to backend/.env to enable it."
+        )
+    user = (
+        f"Company: {name}\nWebsite: {website or 'unknown'}\n"
+        f"Context: {description or '—'}\n\n"
+        "Search the web for (1) the key features this company markets — each with a "
+        "one-line sample marketing message in their style and the REAL page URL — "
+        "and (2) its top 3 real marketing copy lines/taglines with the URL where "
+        "each is found. Use NA for any source you can't find."
+    )
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    resp = await client.responses.create(
+        model=settings.openai_model,
+        tools=[{"type": "web_search"}],
+        input=[
+            {"role": "system", "content": _FEATURES_SYSTEM},
+            {"role": "user", "content": user},
+        ],
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "competitor_extras",
+                "schema": _FEATURES_SCHEMA,
+                "strict": True,
+            }
+        },
+    )
+    content = resp.output_text or "{}"
+    run_log.record(system=_FEATURES_SYSTEM, user=user, response=content)  # capture for the report
+    data = json.loads(content)
+
+    features = []
+    for f in data.get("features", []):
+        feat = (f.get("feature") or "").strip()
+        if not feat:
+            continue
+        features.append({
+            "feature": feat,
+            "sample_marketing": (f.get("sample_marketing") or "").strip(),
+            "source": _clean_url((f.get("source") or "NA").strip() or "NA"),
+        })
+
+    marketing_copy = []
+    for c in data.get("marketing_copy", [])[:3]:
+        copy = (c.get("copy") or "").strip()
+        if not copy:
+            continue
+        marketing_copy.append({
+            "copy": copy,
+            "source": _clean_url((c.get("source") or "NA").strip() or "NA"),
+        })
+
+    return {"features": features, "marketing_copy": marketing_copy}
+
+
+def _ad_library_links(name: str, website: str | None) -> dict:
+    """Deterministic links to public ad libraries for this competitor (no LLM)."""
+    from urllib.parse import quote_plus
+
+    q = quote_plus(name)
+    return {
+        "meta": (
+            "https://www.facebook.com/ads/library/?active_status=all&ad_type=all"
+            f"&country=ALL&q={q}&search_type=keyword_unordered"
+        ),
+        "google": f"https://adstransparency.google.com/?region=anywhere&query={q}",
+        "playstore": f"https://play.google.com/store/search?q={q}&c=apps",
+    }
+
+
+async def _fetch_og_image(page_url: str) -> str | None:
+    """Fetch a page and return its og:image (or twitter:image) URL, resolved."""
+    from urllib.parse import urljoin
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=15.0, follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"},
+        ) as client:
+            html = (await client.get(page_url)).text
+    except Exception:  # noqa: BLE001
+        return None
+    for prop in ("og:image", "twitter:image", "og:image:url"):
+        m = re.search(
+            rf'<meta[^>]+(?:property|name)=["\']{re.escape(prop)}["\'][^>]+content=["\']([^"\']+)["\']',
+            html, re.I,
+        ) or re.search(
+            rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']{re.escape(prop)}["\']',
+            html, re.I,
+        )
+        if m:
+            return urljoin(page_url, m.group(1).strip())
+    return None
+
+
+async def _loads_as_image(client: httpx.AsyncClient, url: str) -> bool:
+    """True only if the URL returns a real image (HTTP 200 + image/* content-type)."""
+    try:
+        r = await client.get(url)
+    except Exception:  # noqa: BLE001
+        return False
+    return r.status_code == 200 and r.headers.get("content-type", "").startswith("image/")
+
+
+async def _fetch_feature_image(page_url: str, hint: str | None = None) -> str | None:
+    """Return a REAL content image from the page that best illustrates the feature:
+    scans <img>/srcset, filters out logos/icons/svg, ranks by the feature name, and
+    only falls back to og:image if no content image is found."""
+    import html as _html
+    from urllib.parse import urljoin
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=15.0, follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"},
+        ) as client:
+            html = (await client.get(page_url)).text
+    except Exception:  # noqa: BLE001
+        return None
+
+    candidates: list[tuple[str, str]] = []
+    for tag in re.findall(r"<img[^>]+>", html, re.I):
+        src = None
+        for attr in ("data-src", "data-lazy-src", "src"):
+            m = re.search(rf'{attr}=["\']([^"\']+)["\']', tag, re.I)
+            if m:
+                src = m.group(1)
+                break
+        if not src:
+            m = re.search(r'srcset=["\']([^"\']+)["\']', tag, re.I)
+            if m:  # take the last (largest) entry of the srcset
+                src = m.group(1).split(",")[-1].strip().split(" ")[0]
+        if not src:
+            continue
+        alt = ""
+        am = re.search(r'alt=["\']([^"\']*)["\']', tag, re.I)
+        if am:
+            alt = am.group(1)
+        candidates.append((urljoin(page_url, _html.unescape(src.strip())), alt))
+
+    _BAD = ("logo", "icon", "sprite", "favicon", "avatar", "badge", "pixel",
+            "1x1", "spacer", "loader", "placeholder", "blank")
+
+    def ok(url: str) -> bool:
+        u = url.lower()
+        if not u.startswith("http") or u.startswith("data:") or u.endswith(".svg"):
+            return False
+        return not any(b in u for b in _BAD)
+
+    good = [(u, a) for (u, a) in candidates if ok(u)]
+    if hint:
+        words = [w.lower() for w in re.findall(r"\w+", hint) if len(w) > 2]
+        good.sort(
+            key=lambda it: sum(1 for w in words if w in (it[0] + " " + it[1]).lower()),
+            reverse=True,
+        )
+    # Return the first candidate that ACTUALLY loads as an image, so the UI never
+    # commits to a broken URL (e.g. a homepage's dynamic og:image that 404s and
+    # leaves the picture blank — the caller can then fall back to another page).
+    async with httpx.AsyncClient(
+        timeout=8.0, follow_redirects=True,
+        headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"},
+    ) as client:
+        for url, _alt in good[:8]:
+            if await _loads_as_image(client, url):
+                return url
+        og = await _fetch_og_image(page_url)
+        if og and await _loads_as_image(client, og):
+            return og
+    return None
+
+
+async def _marketing_image(features: list[dict], website: str | None) -> dict | None:
+    """Pick a real marketing image that illustrates one of the listed features:
+    the og:image of a feature's source page (fallback: the homepage)."""
+    for f in features:
+        src = f.get("source") or ""
+        if src.startswith("http"):
+            img = await _fetch_og_image(src)
+            if img:
+                return {"image": img, "feature": f.get("feature"), "page": src}
+    if website:
+        home = website if website.startswith("http") else f"https://{website}"
+        img = await _fetch_og_image(home)
+        if img:
+            return {"image": img, "feature": None, "page": home}
+    return None
+
+
+# Tracking params that search tools tack on (Bing/Google/etc.) — strip them so
+# the source URL is the clean canonical page.
+_TRACKING_PARAMS = {
+    "msockid", "gclid", "fbclid", "mc_cid", "mc_eid", "yclid", "_hsenc", "_hsmi",
+}
+
+
+def _clean_url(url: str) -> str:
+    if not url or not url.startswith("http"):
+        return url
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    try:
+        parts = urlsplit(url)
+        kept = [
+            (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+            if k.lower() not in _TRACKING_PARAMS and not k.lower().startswith("utm_")
+        ]
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(kept), parts.fragment))
+    except Exception:  # noqa: BLE001
+        return url
+
+
 async def analyze_competitor(
     *, name: str, website: str | None, description: str | None
 ) -> dict:
+    # Qwen: analysis up to social media presence.
     user = f"""Competitor to analyze: {name}
 Website: {website or "unknown"}
 Known context: {description or "—"}
 
 Using your own knowledge, give this company's most recent known annual revenue
 and its number of users/customers, citing a source for each where you know one.
-Produce the full structured analysis. Use "NA" only when a figure is genuinely
-unknown to you."""
+Produce the structured analysis up to social presence. Use "NA" only when a
+figure is genuinely unknown to you."""
 
     system = _ANALYSIS_SYSTEM + _json_instruction(_EXAMPLE_ANALYSIS)
     content = await _chat(system=system, user=user, json_mode=True, temperature=0.2)
-    return _loads(content)
+    result = _loads(content)
+
+    # OpenAI (ChatGPT web search): features marketed + top-3 marketing copy.
+    try:
+        extras = await _openai_extras(name=name, website=website, description=description)
+        result["features"] = extras["features"]
+        result["marketing_copy"] = extras["marketing_copy"]
+    except Exception:  # noqa: BLE001 — analysis still returns; these stay empty
+        result.setdefault("features", [])
+        result.setdefault("marketing_copy", [])
+
+    # Deterministic ad-library links (Meta / Google / Play Store) — no LLM.
+    result["ad_libraries"] = _ad_library_links(name, website)
+
+    # Marketing image: og:image of one listed feature's page (real, illustrates it).
+    try:
+        result["marketing_image"] = await _marketing_image(result.get("features") or [], website)
+    except Exception:  # noqa: BLE001
+        result["marketing_image"] = None
+    return result

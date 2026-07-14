@@ -237,15 +237,6 @@ function Source({ text }: { text: string }) {
 }
 
 // Inline (in-cell) source: renders the citation as a link, no "source:" prefix.
-function SourceCell({ text }: { text: string }) {
-  if (!text || text === 'NA') return <span className="muted">NA</span>
-  const url = text.match(/https?:\/\/[^\s)]+/)?.[0]
-  const label = text.replace(/\s*\(?https?:\/\/[^\s)]+\)?/, '').trim() || 'link'
-  if (!url) return <span>{text}</span>
-  return (
-    <a href={url} target="_blank" rel="noreferrer">{label}</a>
-  )
-}
 
 function AnalysisPanel({
   considered,
@@ -385,25 +376,9 @@ function AnalysisPanel({
             </tbody>
           </table>
 
-          <h4>Features marketed &amp; sample marketing</h4>
-          {a.features.length ? (
-            <table className="atable feature-table">
-              <thead>
-                <tr><th>Feature</th><th>Sample marketing</th><th>Source</th></tr>
-              </thead>
-              <tbody>
-                {a.features.map((f, i) => (
-                  <tr key={i}>
-                    <td>{f.feature || 'NA'}</td>
-                    <td>{f.sample_marketing || 'NA'}</td>
-                    <td><SourceCell text={f.source} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <p className="muted">NA</p>
-          )}
+          <p className="muted" style={{ marginTop: 14 }}>
+            Features marketed &amp; sample marketing are on the <strong>Competitor B</strong> tab.
+          </p>
         </div>
       )}
     </section>

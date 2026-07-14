@@ -91,6 +91,8 @@ async def suggest_brand_content_themes(
                 platform=payload.platform,
                 voice_samples=voice_samples,
                 banned_words=banned_words,
+                inspiration=payload.inspiration,
+                liked_features=payload.liked_features,
             )
         await run_store.persist(db, brand_id, "content:themes", runs)
     except LLMNotConfigured as e:
@@ -133,6 +135,8 @@ async def generate_brand_content(
                 theme_angle=payload.theme_angle,
                 voice_samples=voice_samples,
                 banned_words=banned_words,
+                inspiration=payload.inspiration,
+                liked_features=payload.liked_features,
             )
         await run_store.persist(db, brand_id, stage, runs)
     except LLMNotConfigured as e:

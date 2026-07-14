@@ -1,6 +1,8 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import Response
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -302,3 +304,69 @@ async def delete_competitor(competitor_id: uuid.UUID, db: AsyncSession = Depends
     comp = await _load_competitor(competitor_id, db)
     await db.delete(comp)
     await db.commit()
+
+
+async def _stream_image(url: str) -> Response:
+    async with httpx.AsyncClient(
+        timeout=15.0, follow_redirects=True,
+        headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"},
+    ) as client:
+        r = await client.get(url)
+    ctype = r.headers.get("content-type", "")
+    if r.status_code != 200 or not ctype.startswith("image/"):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "not an image")
+    return Response(content=r.content, media_type=ctype,
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
+@router.get("/image-proxy")
+async def image_proxy(url: str = Query(..., description="Image URL to fetch and stream")):
+    """Fetch a remote image and stream it back, so competitor marketing images
+    display even when the origin blocks hotlinking/CORS."""
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "url must be http(s)")
+    try:
+        return await _stream_image(url)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"image fetch failed: {e}")
+
+
+@router.get("/feature-image-url")
+async def feature_image_url(
+    page: str = Query(...),
+    feature: str | None = Query(None),
+):
+    """Return the URL of the real content image chosen for a feature's page, so the
+    UI can both display it (via image-proxy) and show where it came from."""
+    from app.services.llm import _fetch_feature_image
+
+    if not (page.startswith("http://") or page.startswith("https://")):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "page must be http(s)")
+    img = await _fetch_feature_image(page, hint=feature)
+    if not img:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no image found on page")
+    return {"image": img, "page": page}
+
+
+@router.get("/feature-image")
+async def feature_image(
+    page: str = Query(..., description="Feature page to pull the image from"),
+    feature: str | None = Query(None, description="Feature name, used to rank images"),
+):
+    """Fetch a real content image that illustrates the feature from its page and
+    stream it — used by the 'select feature to search ad for' picker."""
+    from app.services.llm import _fetch_feature_image
+
+    if not (page.startswith("http://") or page.startswith("https://")):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "page must be http(s)")
+    img = await _fetch_feature_image(page, hint=feature)
+    if not img:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no image found on page")
+    try:
+        return await _stream_image(img)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"image fetch failed: {e}")

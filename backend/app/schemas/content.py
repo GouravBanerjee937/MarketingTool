@@ -7,6 +7,10 @@ class _ContentReqBase(BaseModel):
     form: str  # 'long' | 'short'
     content_format: str = Field(min_length=1, max_length=80)
     platform: str = Field(min_length=1, max_length=80)
+    # Optional inspiration: a considered competitor to draw inspiration from, plus
+    # liked features (from other competitors) to weave in.
+    inspiration: str | None = Field(default=None, max_length=200)
+    liked_features: list[str] = Field(default_factory=list, max_length=50)
 
     @field_validator("form")
     @classmethod

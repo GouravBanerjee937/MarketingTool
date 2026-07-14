@@ -89,6 +89,9 @@ export interface CompetitorAnalysis {
     thirdparty: string
   }
   features: { feature: string; sample_marketing: string; source: string }[]
+  marketing_copy?: { copy: string; source: string }[]
+  ad_libraries?: { meta: string; google: string; playstore: string }
+  marketing_image?: { image: string; feature: string | null; page: string } | null
 }
 
 export interface Competitor {
@@ -113,6 +116,8 @@ export interface ContentThemesInput {
   form: ContentForm
   content_format: string
   platform: string
+  inspiration?: string
+  liked_features?: string[]
 }
 
 export interface ContentTheme {
@@ -130,6 +135,8 @@ export interface ContentGenerateInput {
   platform: string
   theme_title?: string
   theme_angle?: string
+  inspiration?: string
+  liked_features?: string[]
 }
 
 export interface ContentResult {

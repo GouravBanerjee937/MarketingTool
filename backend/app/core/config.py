@@ -9,9 +9,13 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://aimark:aimark@localhost:5432/aimark"
     cors_origins: str = "http://localhost:5173"
 
-    # LLM (Qwen via Ollama) — used by the competitor / content features
+    # LLM (Qwen via Ollama) — competitor analysis up to social presence, content
     ollama_url: str = "http://164.52.211.30:11434/api/chat"
     ollama_model: str = "qwen3.5:9b"
+
+    # OpenAI (ChatGPT) — generates the "features marketed & sample marketing" part
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4o-mini"
 
     @property
     def cors_origins_list(self) -> list[str]:

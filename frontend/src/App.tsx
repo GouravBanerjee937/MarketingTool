@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { BrandInputs } from './components/BrandInputs'
 import { ICPBuilder } from './components/ICPBuilder'
 import { CompetitorAgent } from './components/CompetitorAgent'
+import { CompetitorFeatures } from './components/CompetitorFeatures'
 import { ContentCreator } from './components/ContentCreator'
 import { AnalysisExport } from './components/AnalysisExport'
 import './App.css'
@@ -10,6 +11,7 @@ const STEPS = [
   { key: 'brand-inputs', label: 'Brand inputs', render: () => <BrandInputs /> },
   { key: 'icp-builder', label: 'ICP builder', render: () => <ICPBuilder /> },
   { key: 'competitors', label: 'Competitors', render: () => <CompetitorAgent /> },
+  { key: 'competitor-b', label: 'Competitor B', render: () => <CompetitorFeatures /> },
   { key: 'content', label: 'Content creation', render: () => <ContentCreator /> },
   { key: 'analysis', label: 'Analysis', render: () => <AnalysisExport /> },
 ] as const
