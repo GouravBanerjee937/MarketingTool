@@ -34,6 +34,9 @@ HEADERS = [
     "Competitor analysis (max 3)",
     "Competitor fetch — system prompt", "Competitor fetch — user prompt (inputs)", "Competitor fetch — response (output)",
     "Competitor analysis — system prompt", "Competitor analysis — user prompt (inputs)", "Competitor analysis — response (output)",
+    "Competitor features & marketing copy (ChatGPT web-search) — system prompt",
+    "Competitor features & marketing copy (ChatGPT web-search) — user prompt (inputs)",
+    "Competitor features & marketing copy (ChatGPT web-search) — response (output)",
     "Content themes — system prompt", "Content themes — user prompt (inputs)", "Content themes — response (output)",
     "Content script — system prompt", "Content script — user prompt (inputs)", "Content script — response (output)",
 ]
@@ -136,6 +139,10 @@ async def _snapshot(db: AsyncSession, brand_id: uuid.UUID) -> dict | None:
             f"{f.get('feature', '')}: {f.get('sample_marketing', '')} (src: {f.get('source', 'NA')})"
             for f in (a.get("features") or [])
         )
+        copies = " | ".join(
+            f"{i + 1}. {c2.get('copy', '')} (src: {c2.get('source', 'NA')})"
+            for i, c2 in enumerate(a.get("marketing_copy") or [])
+        )
         return (
             f"{c.name}:"
             f"\n  Revenue USD: {a.get('revenue_usd') or 'NA'}"
@@ -145,14 +152,25 @@ async def _snapshot(db: AsyncSession, brand_id: uuid.UUID) -> dict | None:
             f"\n  Social: IG {_yn(social, 'instagram')}, Blog {_yn(social, 'blog')}, "
             f"FB {_yn(social, 'facebook')}, X {_yn(social, 'x')}, Other {social.get('thirdparty') or 'NA'}"
             f"\n  Features: {feats or 'NA'}"
+            f"\n  Marketing copy (Top 3): {copies or 'NA'}"
         )
 
-    def grp(prefix: str, names: set | None = None, last_only: bool = False) -> tuple[str, str, str]:
+    def grp(
+        prefix: str,
+        names: set | None = None,
+        last_only: bool = False,
+        seq_filter=None,
+    ) -> tuple[str, str, str]:
         sel = []
         for r in runs:
             if not r.stage.startswith(prefix):
                 continue
             if prefix == "competitors:analyze:" and names is not None and r.stage[len(prefix):] not in names:
+                continue
+            # Within a competitor analysis, seq 0 = base (Qwen) call, seq 1+ = the
+            # ChatGPT web-search call for features + marketing copy. seq_filter lets
+            # the two be reported in their own columns.
+            if seq_filter is not None and not seq_filter(r.seq):
                 continue
             sel.append(r)
         if last_only and sel:
@@ -170,7 +188,9 @@ async def _snapshot(db: AsyncSession, brand_id: uuid.UUID) -> dict | None:
     rejected_cell = "\n".join(comp_line(c) for c in competitors if c.status == "rejected") or "—"
     analysis_cell = "\n\n".join(analysis_str(c) for c in targets if c.analysis) or "—"
     fetch_sys, fetch_usr, fetch_rsp = grp("competitors:fetch")
-    an_sys, an_usr, an_rsp = grp("competitors:analyze:", target_names)
+    # Base analysis (Qwen) = seq 0; features + marketing copy (ChatGPT web search) = seq 1+.
+    an_sys, an_usr, an_rsp = grp("competitors:analyze:", target_names, seq_filter=lambda s: s == 0)
+    fx_sys, fx_usr, fx_rsp = grp("competitors:analyze:", target_names, seq_filter=lambda s: s >= 1)
     th_sys, th_usr, th_rsp = grp("content:themes", last_only=True)
     sc_sys, sc_usr, sc_rsp = grp("content:generate", last_only=True)
 
@@ -191,6 +211,9 @@ async def _snapshot(db: AsyncSession, brand_id: uuid.UUID) -> dict | None:
         "Competitor analysis — system prompt": an_sys,
         "Competitor analysis — user prompt (inputs)": an_usr,
         "Competitor analysis — response (output)": an_rsp,
+        "Competitor features & marketing copy (ChatGPT web-search) — system prompt": fx_sys,
+        "Competitor features & marketing copy (ChatGPT web-search) — user prompt (inputs)": fx_usr,
+        "Competitor features & marketing copy (ChatGPT web-search) — response (output)": fx_rsp,
         "Content themes — system prompt": th_sys,
         "Content themes — user prompt (inputs)": th_usr,
         "Content themes — response (output)": th_rsp,
@@ -233,7 +256,17 @@ async def build_bytes(db: AsyncSession, brand_id: uuid.UUID) -> bytes | None:
         .all()
     )
     if passes:
-        rows = [(p.serial, p.snapshot) for p in passes]
+        # Backfill columns that were ADDED after a pass was frozen (e.g. the new
+        # ChatGPT features/marketing-copy prompt columns) from the current state,
+        # so newly-added analysis columns aren't blank for older passes.
+        live = await _snapshot(db, brand_id) or {}
+        rows = []
+        for p in passes:
+            snap = dict(p.snapshot or {})
+            for h in HEADERS:
+                if snap.get(h) is None and live.get(h) is not None:
+                    snap[h] = live[h]
+            rows.append((p.serial, snap))
     else:
         snap = await _snapshot(db, brand_id)
         rows = [(1, snap)] if snap else []
